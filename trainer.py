@@ -21,8 +21,9 @@ class Trainer(object):
         self.l1_ll=[]
         self.total_ll=[]
         self.pixel_ll=[]
+        self.l_w_ll=[]
           #WandB
-        wandb.init(project="celeba_with_ws_1")
+        wandb.init(project="celeba_with_ws_edited_final")
 
         self.model = model
         self.data_loader = data_loader
@@ -67,12 +68,15 @@ class Trainer(object):
         self.lambda_landmarks = 0.001
         self.r1_gamma = 10
         
+
         if self.num_epoch <1000:
-            self.lambda_id = 0.02
-            self.lambda_l_w = 0.02
-        else:
             self.lambda_id = 1
             self.lambda_l_w = 1
+            self.lambda_landmarks = 0.1
+        if self.num_epoch>1000:
+            self.lambda_id = 15
+            self.lambda_l_w = 10
+            self.lambda_landmarks = 0.1
             
 
         # Test
@@ -115,6 +119,7 @@ class Trainer(object):
         pixel_loss = 0
         w_d_loss = 0
         w_loss = 0
+        l_w_loss = 0
 
         self.logger.info(f'train in epoch: {self.num_epoch}')
         self.model.train()
@@ -133,9 +138,10 @@ class Trainer(object):
 
 
         attr_img, id_img, id_mask, real_w, real_img, matching_ws = self.data_loader.get_batch(is_cross=self.is_cross_epoch)
-#         print('matching_ws:' , matching_ws.shape)
+        # print('matching_ws:' , type(matching_ws))
         # Forward that does not require grads
         id_embedding = self.model.G.id_encoder(id_mask)
+        print('id_embeding',id_embedding.shape)
         id_embedding_for_loss = self.model.G.pretrained_id_encoder(id_mask)
         src_landmarks = self.model.G.landmarks(id_img)  
         attr_input = attr_img
@@ -144,14 +150,13 @@ class Trainer(object):
 
             attr_out = self.model.G.attr_encoder(attr_input)
             attr_embedding = attr_out
-
+            print('attr_embedding',attr_embedding.shape)
             z_tag = tf.concat([id_embedding, attr_embedding], -1)
             w = self.model.G.latent_spaces_mapping(z_tag)
-#             print('w:' , w.shape)
             fake_w = w[:, 0, :]
-#             print('fake_w:' , fake_w.shape)
-            self.logger.info(
-                f'w stats- mean: {tf.reduce_mean(tf.abs(fake_w)):.5f}, variance: {tf.math.reduce_variance(fake_w):.5f}')
+
+            # self.logger.info(
+            #     f'w stats- mean: {tf.reduce_mean(tf.abs(fake_w)):.5f}, variance: {tf.math.reduce_variance(fake_w):.5f}')
 
             pred = self.model.G.stylegan_s(w)
 
@@ -190,7 +195,10 @@ class Trainer(object):
                     landmarks_loss = self.lambda_landmarks * \
                                      tf.reduce_mean(tf.keras.losses.MSE(src_landmarks, dst_landmarks))
                 self.lnd_ll.append(landmarks_loss)
-
+           
+            l_w_loss = self.lambda_l_w * tf.reduce_mean(tf.keras.losses.MSE(matching_ws, fake_w))
+            print(l_w_loss)
+            self.l_w_ll.append(l_w_loss)
 
             if not self.is_cross_epoch and self.args.pixel_loss:
                 l1_loss = self.pixel_loss_func(id_img, pred, sample_weight=self.pixel_mask)
@@ -212,7 +220,8 @@ class Trainer(object):
             total_g_not_gan_loss = id_loss \
                                    + landmarks_loss \
                                    + pixel_loss \
-                                   + w_loss
+                                   + w_loss \
+                                   + l_w_loss
             self.total_ll.append(total_g_not_gan_loss)
             self.logger.info(f'total G (not gan) loss is {total_g_not_gan_loss:.3f}')
             self.logger.info(f'G gan loss is {g_gan_loss:.3f}')
@@ -220,16 +229,17 @@ class Trainer(object):
             
         if self.num_epoch%100==0:
             wandb.log({"epoch": self.num_epoch, "id_loss": np.mean(self.id_ll),"Lnd_loss": np.mean(self.lnd_ll),
-            "l1_loss": np.mean(self.l1_ll),"pixel_loss":np.mean(self.pixel_ll),
+            "l1_loss": np.mean(self.l1_ll),"pixel_loss":np.mean(self.pixel_ll),"l_w_loss":np.mean(self.l_w_ll),
             "total_g_not_gan_loss":np.mean(self.total_ll),"g_w_gan_loss":g_w_gan_loss,
              "gt_img": wandb.Image(id_img[0]) ,  "mask_img": wandb.Image(id_mask[0]) ,  "pred_img": wandb.Image(pred[0])})
-            self.model.my_save(f'_my_save_epoch_{self.num_epoch}')
+            # self.model.my_save(f'_my_save_epoch_{self.num_epoch}')
 
             self.id_ll=[]
             self.lnd_ll=[]
             self.l1_ll=[]
             self.pixel_ll=[]
             self.total_ll=[]
+            self.l_w_ll=[]
 
         
         if total_g_not_gan_loss != 0:
@@ -262,7 +272,7 @@ class Trainer(object):
 #         ssim_measures= ssim(test_img, resized_img)
 #         rmse_measures= rmse(test_img, resized_img)
 #         sre_measures= sre(test_img, resized_img)
-#         self.model.my_save(f'_my_save_epoch_{self.num_epoch}')	
+        self.model.my_save(f'_my_save_epoch_{self.num_epoch}')	
         out_test = self.model.G(self.mask_test, self.attr_test, self.id_test)[0]
         image_test = tf.clip_by_value(out_test, 0, 1)
         utils.save_image(image_test[0], self.args.images_results.joinpath(f'{self.num_epoch}_first_prediction_test.png'))
